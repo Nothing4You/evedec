@@ -13,53 +13,77 @@ store_path = ..\
 
 '''
 
+def test(s, s2, s3, s4, s5, s6, s7):
+    print "test"
+    print s3
+
+def unjumble(pool, keys, filename, code, result_q, store_path, lock):
+#    with lock:
+#    print '# unjumble %s' % filename
+    sys.stdout.flush()
+    code = UnjumbleString(keys, code)[8:]
+    pool.apply_async(process_func, args=(filename, code, result_q, store_path, lock))
+
 #function executed by each decompile process
-def process_func(code_q, result_q, store_path, lock):
+def process_func(filename, marshalled_code, result_q, store_path, lock):
+    with lock:
+        print '# process_func %s' % filename
+        sys.stdout.flush()
+
     okay_files = failed_files = 0
     try:
         import sys, os, marshal, errno, Queue
         import uncompyle2
-        while 1:
-            filename, marshalled_code = code_q.get(True, 5) #give up after 5 sec
-            if filename == None: #None is our end marker
-                break
+
+        try:
+            code = marshal.loads(marshalled_code)
+            
+            #prepend our store_path
+            filename = os.path.join(store_path, filename)
+            filename = os.path.abspath(filename)
             try:
-                code = marshal.loads(marshalled_code)
+                os.makedirs(os.path.dirname(filename))
+            except OSError as e:
+                #the dir may already exist, in which case ignore error
+                if e.errno != errno.EEXIST:
+                    raise
+            try:
+                os.remove(filename+'_failed')
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    raise
+            with open(filename, 'w') as out_file:
+                uncompyle2.uncompyle('2.7', code, out_file)
+        except KeyboardInterrupt:
+            raise
+        except:
+            with lock:
+                print '### Can\'t decompile %s' % filename
+                sys.stdout.flush()
+            os.rename(filename, filename+'_failed')
+            failed_files += 1
+        else:
+            with lock:
+                print '+++ Okay decompiling %s' % filename
+                sys.stdout.flush()
+            okay_files += 1
                 
-                #prepend our store_path
-                filename = os.path.join(store_path, filename)
-                filename = os.path.abspath(filename)
-                try:
-                    os.makedirs(os.path.dirname(filename))
-                except OSError as e:
-                    #the dir may already exist, in which case ignore error
-                    if e.errno != errno.EEXIST:
-                        raise
-                try:
-                    os.remove(filename+'_failed')
-                except OSError as e:
-                    if e.errno != errno.ENOENT:
-                        raise
-                with open(filename, 'w') as out_file:
-                    uncompyle2.uncompyle('2.7', code, out_file)
-            except KeyboardInterrupt:
-                raise
-            except:
-                with lock:
-                    print '### Can\'t decompile %s' % filename
-                    sys.stdout.flush()
-                os.rename(filename, filename+'_failed')
-                failed_files += 1
-            else:
-                with lock:
-                    print '+++ Okay decompiling %s' % filename
-                    sys.stdout.flush()
-                okay_files += 1
-                
-    except Queue.Empty: #timeout reached
-        pass
     finally:
         result_q.put((okay_files, failed_files))
+
+def UnjumbleString(keys, s):
+    try:
+        key = keys[0][0]
+        dec_s = key.decrypt(s)
+
+        return zlib.decompress(dec_s)
+    except zlib.error:
+        print 'Key failed. Attempting key switch.'
+        del keys[0]
+        if not keys:
+            print >> sys.stderr, '!!! All keys failed. Exiting.'
+            sys.exit(-1)
+        return UnjumbleString(s)
 
 #executed once by the starting process
 if __name__ == '__main__':
@@ -70,7 +94,7 @@ if __name__ == '__main__':
         sys.exit(-1)
     import os, cPickle, imp, zipfile, zlib, traceback, pyDes
     from Queue import Empty
-    from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
+    from multiprocessing import Process, Pool, Queue, cpu_count, freeze_support, Lock
     from datetime import datetime
     from ConfigParser import ConfigParser
 
@@ -156,23 +180,7 @@ if __name__ == '__main__':
               plain[12:].encode('hex'))
         print
 
-    def UnjumbleString(s):
-        try:
-            key = keys[0][0]
-            dec_s = key.decrypt(s)
 
-            return zlib.decompress(dec_s)
-        except zlib.error:
-            print 'Key failed. Attempting key switch.'
-            del keys[0]
-            if not keys:
-                print >> sys.stderr, '!!! All keys failed. Exiting.'
-                sys.exit(-1)
-            return UnjumbleString(s)
-
-
-    #queue of marshalled code objects
-    code_queue = Queue()
     #queue of process results
     result_queue = Queue()
     
@@ -180,36 +188,30 @@ if __name__ == '__main__':
         
     try:
         #create decompile processes
-        procs = []
+        pool = Pool(processes=cpu_count())
         print_lock = Lock()
-        for i in range(cpu_count()-1): #save one process for decompressing/decrypting
-            procs.append(Process(target=process_func,
-                                 args=(code_queue, result_queue, store_path, print_lock)));
-            
-        #start procs now; they will block on empty queue
-        for p in procs:
-            p.start()
-            
+
+        args=("-", "", "-", "", "", "", "")
+        pool.apply_async(test, args=args)
+
         with zipfile.ZipFile(os.path.join(eve_path, 'code.ccp'), 'r') as zf:
             for filename in zf.namelist():
                 if filename[-4:] == '.pyj':
-                    code_queue.put( (filename[:-1], UnjumbleString(zf.read(filename))[8:]) )
+                    sys.stdout.write("@")
+                    args = (keys, filename[:-1], zf.read(filename), result_queue, store_path, print_lock, pool)
+                    pool.apply_async(test, args=args)
+                    #pool.apply_async(unjumble, args=(pool, keys, filename[:-1], zf.read(filename), result_queue, store_path, print_lock))
                 elif filename[-4:] == '.pyc':
-                    code_queue.put( (filename[:-1], zf.read(filename)[8:]) )
+                    sys.stdout.write("!")
+                    pool.apply_async(process_func, args=(filename[:-1], zf.read(filename)[8:], result_queue, store_path, print_lock))
+                break;
 
-        #this process is done except for waiting, so add one more decompile process
-        p = Process(target=process_func,
-                    args=(code_queue, result_queue, store_path, print_lock))
-        p.start()
-        procs.append(p)
-        
-        #add sentinel values to indicate end of queue
-        for p in procs:
-            code_queue.put( (None, None) )
+        pool.apply_async(test, args=("+", "", "+", "", "", "", ""))
 
         #wait for decompile processes to finish
-        for p in procs:
-            p.join() #join() will block until p is finished
+        pool.close()
+        pool.join()
+
         #pull results from the result queue
         okay_files = failed_files = 0
         try:

@@ -68,28 +68,26 @@ if __name__ == '__main__':
     if sys.version[:3] != '2.7':
         print >>sys.stderr, '!!! Wrong Python version : %s.  Python 2.7 required.'
         sys.exit(-1)
-    import os, cPickle, imp, zipfile, zlib, traceback
+    import os, cPickle, imp, zipfile, zlib, traceback, pyDes
     from Queue import Empty
     from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
     from datetime import datetime
     from ConfigParser import ConfigParser
-    from ctypes import windll, c_void_p, c_int, create_string_buffer, byref
 
     freeze_support()
-    
+
     startTime = datetime.now() #time this cpu hog
-    
+
     #Get path to Eve installation from evedec.ini file
     config = ConfigParser()
     config.read('evedec.ini')
     eve_path = config.get('main', 'eve_path')
-    
+
     #use version info from eve's common.ini to create directory name
     eveconfig = ConfigParser()
     eveconfig.read(os.path.join(eve_path, 'start.ini'))
 
-    store_path = os.path.join(config.get('main', 'store_path'), \
-      'eve-%s.%s' % (eveconfig.get('main', 'version'), eveconfig.get('main', 'build')))
+    store_path = os.path.join(config.get('main', 'store_path'), 'eve-%s.%s' % (eveconfig.get('main', 'version'), eveconfig.get('main', 'build')))
     store_path = os.path.abspath(store_path)
 
     #search blue.dll for keyblob header
@@ -116,30 +114,21 @@ if __name__ == '__main__':
 
         if p:
             keylocs.append(i)
-            
+
     if keylocs:
         print 'Number of possible keys found: %s' % len(keylocs)
     else:
         print >> sys.stderr, '!!! No keys found in blue.dll.'
         sys.exit(-1)
 
-    #set up crypt api
-    #need a context before we can import key
-    hProv = c_void_p()
-    windll.advapi32.CryptAcquireContextA(byref(hProv), 0, 'Microsoft Enhanced Cryptographic Provider v1.0', 1, 0xf0000000)
-
     keys = []
     for keyloc in keylocs:
         #build key blob
         #just convert to plaintextkeyblob as it's a little simpler to import
-        # win2000 doesn't support plaintextkeyblob, if you're using win2000 you have bigger problems
-        keyblob = '080200000366000018000000'.decode('hex') #plaintextkeyblob; 3des; length(0x18 = 24 bytes = 196 bit)
-        keyblob += blue[keyloc:keyloc+24][::-1] #reverse key byte order when converting from simpleblob to plaintextkeyblob
-        
-        #import the keyblob and get the key handle
-        hKey = c_void_p()
-        windll.advapi32.CryptImportKey(hProv, keyblob, len(keyblob), 0, 0, byref(hKey))
-        keys.append((hKey, blue[keyloc-len(blob_header):keyloc+24], keyblob))
+        keyblob = blue[keyloc:keyloc+24][::-1] #reverse key byte order when converting from simpleblob to plaintextkeyblob
+
+        hKey = pyDes.triple_des(keyblob, pyDes.CBC, "\0\0\0\0\0\0\0\0", padmode=pyDes.PAD_PKCS5)
+        keys.append((hKey, blue[keyloc-len(blob_header):keyloc+24], '080200000366000018000000'.decode('hex') + keyblob))
 
     for key in keys:
         simple, plain = key[1], key[2]
@@ -167,14 +156,11 @@ if __name__ == '__main__':
               plain[12:].encode('hex'))
         print
 
-    CryptDecrypt = windll.advapi32.CryptDecrypt
-
     def UnjumbleString(s):
         try:
-            bData = create_string_buffer(s)
-            bDataLen = c_int(len(s))
-            CryptDecrypt(keys[0][0], 0, True, 0, bData, byref(bDataLen))
-            dec_s = bData.raw[:bDataLen.value] #decrypted string may be shorter, but not longer
+            key = keys[0][0]
+            dec_s = key.decrypt(s)
+
             return zlib.decompress(dec_s)
         except zlib.error:
             print 'Key failed. Attempting key switch.'
@@ -183,8 +169,8 @@ if __name__ == '__main__':
                 print >> sys.stderr, '!!! All keys failed. Exiting.'
                 sys.exit(-1)
             return UnjumbleString(s)
-            
-    
+
+
     #queue of marshalled code objects
     code_queue = Queue()
     #queue of process results
@@ -238,4 +224,4 @@ if __name__ == '__main__':
         print '# elapsed time:', datetime.now() - startTime
     except:
         traceback.print_exc()
-        os._exit(0) #make Ctrl-C actually end process    
+        os._exit(0) #make Ctrl-C actually end process

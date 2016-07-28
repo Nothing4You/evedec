@@ -25,7 +25,7 @@ def process_func(code_q, result_q, store_path, lock):
                 break
             try:
                 code = marshal.loads(marshalled_code)
-                
+
                 #prepend our store_path
                 filename = os.path.join(store_path, filename)
                 filename = os.path.abspath(filename)
@@ -55,7 +55,7 @@ def process_func(code_q, result_q, store_path, lock):
                     print '+++ Okay decompiling %s' % filename
                     sys.stdout.flush()
                 okay_files += 1
-                
+
     except Queue.Empty: #timeout reached
         pass
     finally:
@@ -68,7 +68,8 @@ if __name__ == '__main__':
     if sys.version[:3] != '2.7':
         print >>sys.stderr, '!!! Wrong Python version : %s.  Python 2.7 required.'
         sys.exit(-1)
-    import os, cPickle, imp, zipfile, zlib, traceback, pyDes
+    import os, cPickle, imp, zipfile, zlib, traceback #, pyDes
+    from Crypto.Cipher import DES3
     from Queue import Empty
     from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
     from datetime import datetime
@@ -127,8 +128,9 @@ if __name__ == '__main__':
         #just convert to plaintextkeyblob as it's a little simpler to import
         keyblob = blue[keyloc:keyloc+24][::-1] #reverse key byte order when converting from simpleblob to plaintextkeyblob
 
-        hKey = pyDes.triple_des(keyblob, pyDes.CBC, "\0\0\0\0\0\0\0\0", padmode=pyDes.PAD_PKCS5)
-        keys.append((hKey, blue[keyloc-len(blob_header):keyloc+24], '080200000366000018000000'.decode('hex') + keyblob))
+        #hKey = pyDes.triple_des(keyblob, pyDes.CBC, "\0\0\0\0\0\0\0\0", padmode=pyDes.PAD_PKCS5)
+
+        keys.append((keyblob, blue[keyloc-len(blob_header):keyloc+24], '080200000366000018000000'.decode('hex') + keyblob))
 
     for key in keys:
         simple, plain = key[1], key[2]
@@ -159,10 +161,17 @@ if __name__ == '__main__':
     def UnjumbleString(s):
         try:
             key = keys[0][0]
+
+            key = DES3.new(key, DES3.MODE_CBC, "\0\0\0\0\0\0\0\0")
+
             dec_s = key.decrypt(s)
+
+            pad_len = ord(dec_s[-1])
+            dec_s = dec_s[:-pad_len]
 
             return zlib.decompress(dec_s)
         except zlib.error:
+            traceback.print_exc()
             print 'Key failed. Attempting key switch.'
             del keys[0]
             if not keys:
@@ -175,9 +184,9 @@ if __name__ == '__main__':
     code_queue = Queue()
     #queue of process results
     result_queue = Queue()
-    
+
     sys.stdout.flush()
-        
+
     try:
         #create decompile processes
         procs = []
@@ -185,11 +194,11 @@ if __name__ == '__main__':
         for i in range(cpu_count()-1): #save one process for decompressing/decrypting
             procs.append(Process(target=process_func,
                                  args=(code_queue, result_queue, store_path, print_lock)));
-            
+
         #start procs now; they will block on empty queue
         for p in procs:
             p.start()
-            
+
         with zipfile.ZipFile(os.path.join(eve_path, 'code.ccp'), 'r') as zf:
             for filename in zf.namelist():
                 if filename[-4:] == '.pyj':
@@ -202,7 +211,7 @@ if __name__ == '__main__':
                     args=(code_queue, result_queue, store_path, print_lock))
         p.start()
         procs.append(p)
-        
+
         #add sentinel values to indicate end of queue
         for p in procs:
             code_queue.put( (None, None) )

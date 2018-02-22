@@ -68,7 +68,7 @@ if __name__ == '__main__':
     if sys.version[:3] != '2.7':
         print >>sys.stderr, '!!! Wrong Python version : %s.  Python 2.7 required.'
         sys.exit(-1)
-    import os, cPickle, imp, zipfile, zlib, traceback #, pyDes
+    import os, cPickle, imp, zipfile, zlib, traceback
     from Crypto.Cipher import DES3
     from Queue import Empty
     from multiprocessing import Process, Queue, cpu_count, freeze_support, Lock
@@ -88,8 +88,7 @@ if __name__ == '__main__':
     eveconfig = ConfigParser()
     eveconfig.read(os.path.join(eve_path, 'start.ini'))
 
-    store_path = os.path.join(config.get('main', 'store_path'), 'eve-%s.%s' % (eveconfig.get('main', 'version'), eveconfig.get('main', 'build')))
-    store_path = os.path.abspath(store_path)
+    store_path = os.path.abspath(config.get('main', 'store_path'))
 
     #search blue.dll for keyblob header
     #yeah, it's really that easy
@@ -127,8 +126,6 @@ if __name__ == '__main__':
         #build key blob
         #just convert to plaintextkeyblob as it's a little simpler to import
         keyblob = blue[keyloc:keyloc+24][::-1] #reverse key byte order when converting from simpleblob to plaintextkeyblob
-
-        #hKey = pyDes.triple_des(keyblob, pyDes.CBC, "\0\0\0\0\0\0\0\0", padmode=pyDes.PAD_PKCS5)
 
         keys.append((keyblob, blue[keyloc-len(blob_header):keyloc+24], '080200000366000018000000'.decode('hex') + keyblob))
 
